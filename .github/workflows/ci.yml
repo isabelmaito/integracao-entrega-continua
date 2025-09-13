@@ -43,20 +43,24 @@ jobs:
         id: version
         run: |
           git fetch --tags
-          LAST_TAG=$(git describe --tags `git rev-list --tags --max-count=1`)
-          if [ -z "$LAST_TAG" ]; then
-            LAST_TAG="v0.0.0"
-          fi
+          LAST_TAG=$(git describe --tags `git rev-list --tags --max-count=1` 2>/dev/null || echo "v0.0.0")
           echo "Versão Atual: $LAST_TAG"
           
+          # Obter commits desde a última tag
           if [ "$LAST_TAG" = "v0.0.0" ]; then
-            COMMITS=$(git log --pretty=format:"%s")
+            COMMIT_MESSAGES=$(git log --pretty=format:"%s" | tr '\n' '|')
           else
-            COMMITS=$(git log ${LAST_TAG}..HEAD --pretty=format:"%s")
+            COMMIT_MESSAGES=$(git log ${LAST_TAG}..HEAD --pretty=format:"%s" | tr '\n' '|')
           fi
           
-          echo "Commits desde a última tag:"
-          echo "$COMMITS"
+          echo "Commits desde a última tag: $COMMIT_MESSAGES"
+          
+          # Verificar se há commits para processar
+          if [ -z "$COMMIT_MESSAGES" ]; then
+            echo "Nenhum commit encontrado desde a última tag"
+            echo "should_version=false" >> $GITHUB_ENV
+            exit 0
+          fi
           
           # Inicializando variáveis
           MAJOR=0
@@ -64,35 +68,60 @@ jobs:
           PATCH=0
           
           # Analisando mensagens de commit
-          for COMMIT in "$COMMITS"; do
+          IFS='|' read -ra COMMITS <<< "$COMMIT_MESSAGES"
+          for COMMIT in "${COMMITS[@]}"; do
+            echo "Analisando commit: $COMMIT"
             if [[ "$COMMIT" == *"BREAKING CHANGE"* ]]; then
               MAJOR=1
+              echo "Encontrado BREAKING CHANGE"
             elif [[ "$COMMIT" == *"feat"* ]]; then
               MINOR=1
+              echo "Encontrado feat"
             elif [[ "$COMMIT" == *"fix"* ]]; then
               PATCH=1
+              echo "Encontrado fix"
             fi
           done
           
+          # Verificar se alguma mudança foi detectada
+          if [[ $MAJOR -eq 0 && $MINOR -eq 0 && $PATCH -eq 0 ]]; then
+            echo "Nenhuma mudança versionável detectada"
+            echo "should_version=false" >> $GITHUB_ENV
+            exit 0
+          fi
+          
           # Calculando a nova versão usando semver
           CURRENT_VERSION=${LAST_TAG#v}
-          NEW_VERSION=$CURRENT_VERSION
           if [[ $MAJOR -eq 1 ]]; then
             NEW_VERSION=$(semver -i major $CURRENT_VERSION)
+            echo "Incrementando versão MAJOR"
           elif [[ $MINOR -eq 1 ]]; then
             NEW_VERSION=$(semver -i minor $CURRENT_VERSION)
+            echo "Incrementando versão MINOR"
           elif [[ $PATCH -eq 1 ]]; then
             NEW_VERSION=$(semver -i patch $CURRENT_VERSION)
+            echo "Incrementando versão PATCH"
           fi
           
           echo "Nova versão: $NEW_VERSION"
           echo "new_version=$NEW_VERSION" >> $GITHUB_ENV
+          echo "should_version=true" >> $GITHUB_ENV
+
+      - name: Verificar se deve atualizar versão
+        run: |
+          if [ "${{ env.should_version }}" = "false" ]; then
+            echo "Pulando atualização de versão - nenhuma mudança detectada"
+            exit 0
+          fi
 
       - name: Atualizar versão no package.json
+        if: env.should_version == 'true'
         run: |
-          npm version ${{ env.new_version }} --no-git-tag-version
+          echo "Atualizando versão para ${{ env.new_version }}"
+          npm version ${{ env.new_version }} --no-git-tag-version --allow-same-version
           
       - name: Commit e push
+        if: env.should_version == 'true'
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
